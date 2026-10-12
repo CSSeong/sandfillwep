@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#ffffff">
+  <title>FILL — Sand simulation</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, sans-serif; background: #fff; color: #555; }
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #fff; }
+    #canvas { position: fixed; inset: 0; display: block; width: 100%; height: 100%; background: #fff; touch-action: none; cursor: crosshair; image-rendering: pixelated; }
+    .instructions { position: fixed; inset: 0; display: flex; flex-direction: column; justify-content: center; align-items: center; padding: 24px; text-align: center; color: #555; opacity: .42; pointer-events: none; animation: fade-away 1s ease 9s forwards; }
+    .instructions h1 { margin: 0 0 18px; font-size: clamp(24px, 4vw, 36px); font-weight: 400; letter-spacing: -.04em; }
+    .instructions p { margin: 0; font-size: 13px; line-height: 2; }
+    .instructions small { margin-top: 16px; font-size: 11px; }
+    .instructions[hidden] { display: none; }
+    @keyframes fade-away { to { opacity: 0; visibility: hidden; } }
+    .tools { position: fixed; top: max(18px, env(safe-area-inset-top)); right: max(18px, env(safe-area-inset-right)); display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 14px; max-width: calc(100% - 36px); padding: 10px 12px; background: rgb(255 255 255 / 85%); border-radius: 12px; }
+    .palette { display: flex; gap: 8px; }
+    button { font: inherit; cursor: pointer; touch-action: manipulation; }
+    .palette button { width: 19px; height: 19px; padding: 0; border: 2px solid #fff; border-radius: 50%; background: var(--swatch); }
+    .palette button[aria-pressed="true"] { outline: 1px solid #888; outline-offset: 2px; }
+    .brush { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #999; }
+    .brush input { width: 64px; accent-color: #b6a07a; }
+    .brush output { width: 10px; }
+    .actions { display: flex; gap: 6px; }
+    .actions button { width: 30px; height: 30px; padding: 0; color: #888; background: #fff; border: 1px solid #eee; border-radius: 6px; }
+    .actions button:hover { color: #444; border-color: #ccc; }
+    button:focus-visible, input:focus-visible { outline: 2px solid #8b7758; outline-offset: 4px; }
+    .sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+    @media (max-width: 480px) { .tools { top: max(10px, env(safe-area-inset-top)); right: 10px; gap: 10px; padding: 8px; max-width: calc(100% - 20px); } .palette { gap: 6px; } }
+    @media (prefers-reduced-motion: reduce) { .instructions { animation: none; } }
+  </style>
+</head>
+<body>
+  <canvas id="canvas" aria-label="누르거나 드래그하여 모래를 뿌리는 시뮬레이션" aria-describedby="hint"></canvas>
+  <div class="instructions" id="hint">
+    <h1>모래를 흘려보세요.</h1>
+    <p>화면을 누르거나 드래그하면 모래가 쌓입니다.<br>색상과 붓 크기를 바꿔 나만의 풍경을 만들어보세요.</p>
+    <small>P · 일시정지 / 계속하기 &nbsp;&nbsp; R · 비우기</small>
+  </div>
+  <div class="tools" role="group" aria-label="모래 조작 도구">
+    <div class="palette" role="group" aria-label="모래 색상">
+      <button data-color="1" style="--swatch:#a7bd86" aria-label="연두색 모래" aria-pressed="false" title="연두색 모래"></button>
+      <button data-color="2" style="--swatch:#d79667" aria-label="주황색 모래" aria-pressed="false" title="주황색 모래"></button>
+      <button data-color="3" style="--swatch:#969ecc" aria-label="보라색 모래" aria-pressed="false" title="보라색 모래"></button>
+      <button data-color="4" style="--swatch:#d395ae" aria-label="분홍색 모래" aria-pressed="false" title="분홍색 모래"></button>
+      <button data-color="5" style="--swatch:#d1b176" aria-label="모래색 모래" aria-pressed="true" title="모래색 모래"></button>
+    </div>
+    <label class="brush" for="brush"><span class="sr-only">붓 크기</span><input id="brush" type="range" min="1" max="8" value="3"><output id="size">3</output></label>
+    <div class="actions">
+      <button id="pause" aria-label="일시정지" title="일시정지 (P)" aria-pressed="false">Ⅱ</button>
+      <button id="reset" aria-label="모래 비우기" title="모래 비우기 (R)">↻</button>
+    </div>
+  </div>
+  <span class="sr-only">모래 알갱이 <output id="count">0</output>개 · <span id="status">FLOWING</span></span>
+  <script>
+    (() => {
+      const canvas = document.getElementById('canvas');
+      const ctx = canvas.getContext('2d');
+      const el = id => document.getElementById(id);
+      const baseColors = ['#a7bd86', '#d79667', '#969ecc', '#d395ae', '#d1b176'];
+      const SHADE_COUNT = 17;
+      // Store a shade with each grain, so its brightness stays fixed as it moves.
+      const shades = baseColors.flatMap(hex => {
+        const rgb = [1, 3, 5].map(offset => parseInt(hex.slice(offset, offset + 2), 16));
+        return Array.from({ length: SHADE_COUNT }, (_, shade) => {
+          const brightness = .88 + shade / (SHADE_COUNT - 1) * .24;
+          return `rgb(${rgb.map(channel => Math.min(255, Math.round(channel * brightness))).join(',')})`;
+        });
+      });
+      let W = 0, H = 0, S = 2, grid = new Uint8Array(0);
+      let color = 5, brush = 3, paused = false, pointer = null, pointerId = null, last = 0, count = 0;
+
+      function resize() {
+        const width = window.innerWidth, height = window.innerHeight;
+        const size = Math.max(2, Math.ceil(Math.sqrt(width * height / 300000)));
+        const newW = Math.ceil(width / size), newH = Math.ceil(height / size);
+        const next = new Uint8Array(newW * newH);
+        const dx = Math.floor((newW - W) / 2), dy = newH - H;
+        count = 0;
+        for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+          const grain = grid[y * W + x], xx = x + dx, yy = y + dy;
+          if (grain && xx >= 0 && xx < newW && yy >= 0 && yy < newH) {
+            next[yy * newW + xx] = grain;
+            count++;
+          }
+        }
+        W = newW; H = newH; S = size; grid = next;
+        canvas.width = W * S; canvas.height = H * S;
+        pointer = null;
+        draw();
+      }
+
+      function sprinkle() {
+        if (!pointer) return;
+        const [cx, cy] = pointer;
+        for (let y = -brush; y <= brush; y++) for (let x = -brush; x <= brush; x++) {
+          if (x * x + y * y > brush * brush || Math.random() > .55) continue;
+          const xx = cx + x, yy = cy + y;
+          if (xx >= 0 && xx < W && yy >= 0 && yy < H && !grid[yy * W + xx]) {
+            grid[yy * W + xx] = (color - 1) * SHADE_COUNT + Math.floor(Math.random() * SHADE_COUNT) + 1;
+            count++;
+          }
+        }
+      }
+
+      function step() {
+        for (let y = H - 2; y >= 0; y--) {
+          const reverse = Math.random() < .5;
+          for (let k = 0; k < W; k++) {
+            const x = reverse ? W - 1 - k : k, i = y * W + x;
+            if (!grid[i]) continue;
+            let target = -1;
+            if (!grid[i + W]) target = i + W;
+            else {
+              const d = Math.random() < .5 ? -1 : 1;
+              for (const dir of [d, -d]) {
+                if (x + dir >= 0 && x + dir < W && !grid[i + W + dir]) {
+                  target = i + W + dir;
+                  break;
+                }
+              }
+            }
+            if (target >= 0) { grid[target] = grid[i]; grid[i] = 0; }
+          }
+        }
+      }
+
+      function draw() {
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        for (let i = 0; i < grid.length; i++) if (grid[i]) {
+          ctx.fillStyle = shades[grid[i] - 1];
+          ctx.fillRect((i % W) * S, Math.floor(i / W) * S, S, S);
+        }
+        el('count').textContent = String(count);
+      }
+
+      function position(e) {
+        const r = canvas.getBoundingClientRect();
+        return [Math.floor((e.clientX - r.left) / r.width * W), Math.floor((e.clientY - r.top) / r.height * H)];
+      }
+      canvas.addEventListener('pointerdown', e => {
+        if (e.button !== 0 || !e.isPrimary) return;
+        e.preventDefault();
+        canvas.setPointerCapture(e.pointerId);
+        pointerId = e.pointerId;
+        pointer = position(e);
+        if (!paused) { sprinkle(); draw(); }
+      });
+      canvas.addEventListener('pointermove', e => {
+        if (pointer && e.pointerId === pointerId) pointer = position(e);
+      });
+      for (const event of ['pointerup', 'pointercancel', 'lostpointercapture']) {
+        canvas.addEventListener(event, e => {
+          if (e.pointerId === pointerId) { pointer = null; pointerId = null; }
+        });
+      }
+
+      function pause() {
+        paused = !paused;
+        pointer = null;
+        el('pause').textContent = paused ? '▶' : 'Ⅱ';
+        const label = paused ? '계속하기' : '일시정지';
+        el('pause').setAttribute('aria-label', label);
+        el('pause').setAttribute('aria-pressed', String(paused));
+        el('pause').title = `${label} (P)`;
+        el('status').textContent = paused ? 'PAUSED' : 'FLOWING';
+      }
+      function clear() { grid.fill(0); count = 0; pointer = null; draw(); }
+      el('pause').onclick = pause;
+      el('reset').onclick = clear;
+      el('brush').oninput = e => { brush = Number(e.target.value); el('size').textContent = brush; };
+      document.querySelectorAll('[data-color]').forEach(button => button.onclick = () => {
+        color = Number(button.dataset.color);
+        document.querySelectorAll('[data-color]').forEach(other => other.setAttribute('aria-pressed', String(other === button)));
+      });
+      window.addEventListener('keydown', e => {
+        if (e.target instanceof HTMLInputElement) return;
+        if (e.code === 'KeyP') { e.preventDefault(); pause(); }
+        if (e.code === 'KeyR') { e.preventDefault(); clear(); }
+      });
+      document.addEventListener('visibilitychange', () => { if (document.hidden && !paused) pause(); });
+      window.addEventListener('resize', resize);
+      // Let the one-second fade finish at ten seconds; clearing sand does not restart it.
+      setTimeout(() => { el('hint').hidden = true; }, 10000);
+      function loop(now) {
+        if (now - last >= 1000 / 40) {
+          last = now;
+          if (!paused) { sprinkle(); step(); step(); }
+          draw();
+        }
+        requestAnimationFrame(loop);
+      }
+      resize();
+      requestAnimationFrame(loop);
+    })();
+  </script>
+</body>
+</html>

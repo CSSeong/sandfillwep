@@ -63,17 +63,54 @@
       const baseColors = ['#a7bd86', '#d79667', '#969ecc', '#d395ae', '#d1b176'];
       const SHADE_COUNT = 17;
       // Store a shade with each grain, so its brightness stays fixed as it moves.
-      const shades = baseColors.flatMap(hex => {
+      const paletteBytes = new Uint8ClampedArray((baseColors.length * SHADE_COUNT + 1) * 4);
+      paletteBytes.set([255, 255, 255, 255]);
+      baseColors.forEach((hex, colorIndex) => {
         const rgb = [1, 3, 5].map(offset => parseInt(hex.slice(offset, offset + 2), 16));
-        return Array.from({ length: SHADE_COUNT }, (_, shade) => {
+        for (let shade = 0; shade < SHADE_COUNT; shade++) {
           const brightness = .88 + shade / (SHADE_COUNT - 1) * .24;
-          return `rgb(${rgb.map(channel => Math.min(255, Math.round(channel * brightness))).join(',')})`;
-        });
+          paletteBytes.set([...rgb.map(channel => Math.min(255, Math.round(channel * brightness))), 255],
+            (colorIndex * SHADE_COUNT + shade + 1) * 4);
+        }
       });
+      // Reading palette and image bytes through the same view also works on big-endian devices.
+      const packedColors = new Uint32Array(paletteBytes.buffer);
       let W = 0, H = 0, S = 2, grid = new Uint8Array(0);
+      let activeMin, activeMax, scanMin, scanMax, activeRows = 0;
+      let imageData, pixels, dirtyFlags, dirtyCells, dirtyCount = 0;
       let color = 5, brush = 3, paused = false, pointer = null, pointerId = null, last = 0, count = 0;
+      let frameId = 0, renderedCount = -1;
+      const STEP_MS = 1000 / 40;
+
+      function resetActivity() {
+        activeMin.fill(W); activeMax.fill(-1);
+        scanMin.fill(W); scanMax.fill(-1);
+        activeRows = 0;
+      }
+
+      function wakeRange(y, left, right) {
+        if (y < 0 || y >= H) return;
+        left = Math.max(0, left); right = Math.min(W - 1, right);
+        if (activeMin[y] === W) activeRows++;
+        if (left < activeMin[y]) activeMin[y] = left;
+        if (right > activeMax[y]) activeMax[y] = right;
+      }
+
+      function markDirty(i) {
+        if (!dirtyFlags[i]) { dirtyFlags[i] = 1; dirtyCells[dirtyCount++] = i; }
+      }
+
+      function stopFrame() {
+        if (frameId) cancelAnimationFrame(frameId);
+        frameId = 0; last = 0;
+      }
+
+      function scheduleFrame() {
+        if (!frameId && !paused && (pointer || activeRows)) frameId = requestAnimationFrame(loop);
+      }
 
       function resize() {
+        stopFrame();
         const width = window.innerWidth, height = window.innerHeight;
         const size = Math.max(2, Math.ceil(Math.sqrt(width * height / 300000)));
         const newW = Math.ceil(width / size), newH = Math.ceil(height / size);
@@ -88,9 +125,22 @@
           }
         }
         W = newW; H = newH; S = size; grid = next;
-        canvas.width = W * S; canvas.height = H * S;
-        pointer = null;
-        draw();
+        // One canvas pixel per grain; CSS scales it to the same visible grain size.
+        canvas.width = W; canvas.height = H;
+        imageData = ctx.createImageData(W, H);
+        pixels = new Uint32Array(imageData.data.buffer);
+        dirtyFlags = new Uint8Array(W * H);
+        dirtyCells = new Uint32Array(W * H);
+        dirtyCount = 0;
+        activeMin = new Int32Array(H); activeMax = new Int32Array(H);
+        scanMin = new Int32Array(H); scanMax = new Int32Array(H);
+        resetActivity();
+        for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+          if (grid[y * W + x]) wakeRange(y, x, x);
+        }
+        pointer = null; pointerId = null;
+        draw(true);
+        scheduleFrame();
       }
 
       function sprinkle() {
@@ -100,42 +150,68 @@
           if (x * x + y * y > brush * brush || Math.random() > .55) continue;
           const xx = cx + x, yy = cy + y;
           if (xx >= 0 && xx < W && yy >= 0 && yy < H && !grid[yy * W + xx]) {
-            grid[yy * W + xx] = (color - 1) * SHADE_COUNT + Math.floor(Math.random() * SHADE_COUNT) + 1;
+            const i = yy * W + xx;
+            grid[i] = (color - 1) * SHADE_COUNT + Math.floor(Math.random() * SHADE_COUNT) + 1;
+            markDirty(i);
+            wakeRange(yy, xx, xx);
             count++;
           }
         }
       }
 
       function step() {
-        for (let y = H - 2; y >= 0; y--) {
+        if (!activeRows) return;
+        // Double-buffer row ranges: sleeping grains only wake when their support changes.
+        [activeMin, scanMin] = [scanMin, activeMin];
+        [activeMax, scanMax] = [scanMax, activeMax];
+        activeRows = 0;
+        for (let y = H - 1; y >= 0; y--) {
+          const left = scanMin[y], right = scanMax[y];
+          scanMin[y] = W; scanMax[y] = -1;
+          if (left > right || y === H - 1) continue;
           const reverse = Math.random() < .5;
-          for (let k = 0; k < W; k++) {
-            const x = reverse ? W - 1 - k : k, i = y * W + x;
+          for (let k = left; k <= right; k++) {
+            const x = reverse ? right - (k - left) : k, i = y * W + x;
             if (!grid[i]) continue;
             let target = -1;
             if (!grid[i + W]) target = i + W;
             else {
-              const d = Math.random() < .5 ? -1 : 1;
-              for (const dir of [d, -d]) {
-                if (x + dir >= 0 && x + dir < W && !grid[i + W + dir]) {
-                  target = i + W + dir;
-                  break;
-                }
-              }
+              const canLeft = x > 0 && !grid[i + W - 1];
+              const canRight = x < W - 1 && !grid[i + W + 1];
+              if (canLeft && canRight) target = i + W + (Math.random() < .5 ? -1 : 1);
+              else if (canLeft) target = i + W - 1;
+              else if (canRight) target = i + W + 1;
             }
-            if (target >= 0) { grid[target] = grid[i]; grid[i] = 0; }
+            if (target >= 0) {
+              grid[target] = grid[i]; grid[i] = 0;
+              markDirty(i); markDirty(target);
+              wakeRange(y + 1, target % W, target % W);
+              wakeRange(y - 1, x - 1, x + 1);
+            }
           }
         }
       }
 
-      function draw() {
-        ctx.fillStyle = '#ffffff';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        for (let i = 0; i < grid.length; i++) if (grid[i]) {
-          ctx.fillStyle = shades[grid[i] - 1];
-          ctx.fillRect((i % W) * S, Math.floor(i / W) * S, S, S);
+      function draw(full = false) {
+        if (full) {
+          for (let i = 0; i < grid.length; i++) pixels[i] = packedColors[grid[i]];
+          ctx.putImageData(imageData, 0, 0);
+          dirtyFlags.fill(0); dirtyCount = 0;
+        } else if (dirtyCount) {
+          let left = W, top = H, right = 0, bottom = 0;
+          for (let n = 0; n < dirtyCount; n++) {
+            const i = dirtyCells[n], x = i % W, y = Math.floor(i / W);
+            pixels[i] = packedColors[grid[i]];
+            dirtyFlags[i] = 0;
+            if (x < left) left = x;
+            if (x > right) right = x;
+            if (y < top) top = y;
+            if (y > bottom) bottom = y;
+          }
+          ctx.putImageData(imageData, 0, 0, left, top, right - left + 1, bottom - top + 1);
+          dirtyCount = 0;
         }
-        el('count').textContent = String(count);
+        if (renderedCount !== count) { el('count').textContent = String(count); renderedCount = count; }
       }
 
       function position(e) {
@@ -148,7 +224,7 @@
         canvas.setPointerCapture(e.pointerId);
         pointerId = e.pointerId;
         pointer = position(e);
-        if (!paused) { sprinkle(); draw(); }
+        if (!paused) { sprinkle(); draw(); scheduleFrame(); }
       });
       canvas.addEventListener('pointermove', e => {
         if (pointer && e.pointerId === pointerId) pointer = position(e);
@@ -162,6 +238,8 @@
       function pause() {
         paused = !paused;
         pointer = null;
+        stopFrame();
+        if (!paused) scheduleFrame();
         el('pause').textContent = paused ? '▶' : 'Ⅱ';
         const label = paused ? '계속하기' : '일시정지';
         el('pause').setAttribute('aria-label', label);
@@ -169,7 +247,11 @@
         el('pause').title = `${label} (P)`;
         el('status').textContent = paused ? 'PAUSED' : 'FLOWING';
       }
-      function clear() { grid.fill(0); count = 0; pointer = null; draw(); }
+      function clear() {
+        stopFrame();
+        grid.fill(0); resetActivity(); count = 0; pointer = null; pointerId = null;
+        draw(true);
+      }
       el('pause').onclick = pause;
       el('reset').onclick = clear;
       el('brush').oninput = e => { brush = Number(e.target.value); el('size').textContent = brush; };
@@ -187,15 +269,19 @@
       // Let the one-second fade finish at ten seconds; clearing sand does not restart it.
       setTimeout(() => { el('hint').hidden = true; }, 10000);
       function loop(now) {
-        if (now - last >= 1000 / 40) {
-          last = now;
-          if (!paused) { sprinkle(); step(); step(); }
+        frameId = 0;
+        if (paused) return;
+        if (!last) last = now - STEP_MS;
+        const ticks = Math.min(3, Math.floor((now - last) / STEP_MS));
+        if (ticks) {
+          last = now - (now - last) % STEP_MS;
+          for (let n = 0; n < ticks; n++) { sprinkle(); step(); step(); }
           draw();
         }
-        requestAnimationFrame(loop);
+        if (pointer || activeRows) scheduleFrame();
+        else last = 0;
       }
       resize();
-      requestAnimationFrame(loop);
     })();
   </script>
 </body>

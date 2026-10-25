@@ -1,0 +1,35 @@
+name: Build iOS Simulator app
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Build without a signing certificate
+        run: |
+          xcodebuild \
+            -project ios/FILL.xcodeproj \
+            -scheme FILL \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/FILL-DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+      - name: Package Simulator app
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent \
+            "$RUNNER_TEMP/FILL-DerivedData/Build/Products/Debug-iphonesimulator/FILL.app" \
+            "$RUNNER_TEMP/FILL-Simulator.zip"
+      - name: Upload Simulator app
+        uses: actions/upload-artifact@v4
+        with:
+          name: FILL-iOS-Simulator
+          path: ${{ runner.temp }}/FILL-Simulator.zip

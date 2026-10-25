@@ -36,3 +36,7 @@ GitHub Actions가 `public/` 폴더의 HTML 파일을 GitHub Pages에 배포합�
 저장소의 **Settings → Pages → Build and deployment → Source**에서 **GitHub Actions**를 선택합니다. **Actions → Deploy FILL to GitHub Pages → Run workflow**를 실행합니다. 배포가 끝나면 Pages 설정과 배포 실행 결과에 사이트 주소가 표시됩니다.
 
 이후 `main` 브랜치의 `public/index.html`을 수정해 푸시하면 자동으로 다시 배포됩니다.
+
+## iPhone 앱
+
+기존 HTML을 오프라인으로 실행하는 SwiftUI + WKWebView 프로젝트를 `ios/FILL.xcodeproj`에 포함했습니다. Mac의 Xcode에서 실행할 수 있습니다. 개인 아이폰 설치, 수동 Simulator 빌드와 App Store 준비 절차는 [iPhone 앱 안내](ios/README.md)를 참고하세요. iOS 빌드와 실제 기기 실행은 아직 검증하지 않았습니다.

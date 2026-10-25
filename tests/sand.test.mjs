@@ -178,3 +178,59 @@ test('the single HTML keeps its white background, shade range and ten-second ins
   sand.clear(); assert.equal(element('hint').hidden, true);
   assert.doesNotMatch(html, /<script[^>]+src=|<link[^>]+rel=["']stylesheet/);
 });
+
+function applySize(harness, size) {
+  const control = harness.element('particle-size');
+  control.value = String(size);
+  control.oninput({ target: control });
+}
+
+function flushFrame(harness) {
+  const [[id, callback]] = harness.frames;
+  harness.frames.delete(id);
+  callback(25);
+}
+
+test('particle size input batches changes and preserves grain shades when enlarging and shrinking', () => {
+  const harness = simulation(), { sand, element, frames } = harness;
+  for (let y = sand.H - 3; y < sand.H; y++) for (let x = 0; x < sand.W; x++) sand.add(x, y, (x + y) % 85 + 1);
+  settle(sand);
+  const before = histogram(sand.grid), count = sand.count;
+  sand.pause();
+  applySize(harness, 3); applySize(harness, 4);
+  assert.equal(frames.size, 1, 'dragging queues only one resize');
+  assert.equal(element('particle-size-value').textContent, '4px');
+  flushFrame(harness);
+  assert.equal(sand.W, 20); assert.equal(sand.H, 15);
+  assert.deepEqual(histogram(sand.grid), before);
+  assert.equal(sand.count, count);
+  assert.equal(element('status').textContent, 'PAUSED');
+  assert.equal(frames.size, 0, 'resizing while paused must not resume physics');
+  settle(sand); assertSupported(sand); assertPixels(sand);
+  applySize(harness, 2); flushFrame(harness);
+  assert.equal(sand.W, 40); assert.equal(sand.H, 30);
+  assert.deepEqual(histogram(sand.grid), before);
+  settle(sand); assertSupported(sand); assertPixels(sand);
+});
+
+test('enlarging a full screen fills available capacity without invalid grains or a stuck animation', () => {
+  const harness = simulation(), { sand } = harness;
+  for (let y = 0; y < sand.H; y++) for (let x = 0; x < sand.W; x++) sand.add(x, y, (x + y) % 85 + 1);
+  settle(sand);
+  applySize(harness, 12); flushFrame(harness);
+  assert.equal(sand.count, sand.W * sand.H);
+  assert.ok(sand.grid.every(shade => shade >= 1 && shade <= 85));
+  settle(sand); assertSupported(sand); assertPixels(sand);
+  sand.clear();
+  assert.equal(sand.count, 0);
+  assert.ok(sand.pixels.every(value => value === 0xffffffff));
+});
+
+test('particle size cannot bypass the existing large-screen computation limit', () => {
+  const harness = simulation(1920, 1080), { sand, element } = harness;
+  assert.equal(element('particle-size').min, '3');
+  assert.equal(element('particle-size-value').textContent, '3px');
+  applySize(harness, 2); flushFrame(harness);
+  assert.equal(element('particle-size').value, '3');
+  assert.ok(sand.W * sand.H <= 300000);
+});

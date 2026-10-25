@@ -21,15 +21,16 @@
     button { font: inherit; cursor: pointer; touch-action: manipulation; }
     .palette button { width: 19px; height: 19px; padding: 0; border: 2px solid #fff; border-radius: 50%; background: var(--swatch); }
     .palette button[aria-pressed="true"] { outline: 1px solid #888; outline-offset: 2px; }
-    .brush { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #999; }
-    .brush input { width: 64px; accent-color: #b6a07a; }
+    .brush { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #999; white-space: nowrap; }
+    .brush input { width: 64px; flex-shrink: 0; accent-color: #b6a07a; }
     .brush output { width: 10px; }
+    .particle-size output { width: 30px; }
     .actions { display: flex; gap: 6px; }
     .actions button { width: 30px; height: 30px; padding: 0; color: #888; background: #fff; border: 1px solid #eee; border-radius: 6px; }
     .actions button:hover { color: #444; border-color: #ccc; }
     button:focus-visible, input:focus-visible { outline: 2px solid #8b7758; outline-offset: 4px; }
     .sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-    @media (max-width: 480px) { .tools { top: max(10px, env(safe-area-inset-top)); right: 10px; gap: 10px; padding: 8px; max-width: calc(100% - 20px); } .palette { gap: 6px; } }
+    @media (max-width: 480px) { .tools { top: max(10px, env(safe-area-inset-top)); right: 10px; display: grid; grid-template-columns: auto auto; gap: 10px; padding: 8px; max-width: calc(100% - 20px); } .palette { gap: 6px; grid-column: 1; grid-row: 1; } .actions { grid-column: 2; grid-row: 1; justify-content: flex-end; } }
     @media (prefers-reduced-motion: reduce) { .instructions { animation: none; } }
   </style>
 </head>
@@ -37,7 +38,7 @@
   <canvas id="canvas" aria-label="누르거나 드래그하여 모래를 뿌리는 시뮬레이션" aria-describedby="hint"></canvas>
   <div class="instructions" id="hint">
     <h1>모래를 흘려보세요.</h1>
-    <p>화면을 누르거나 드래그하면 모래가 쌓입니다.<br>색상과 붓 크기를 바꿔 나만의 풍경을 만들어보세요.</p>
+    <p>화면을 누르거나 드래그하면 모래가 쌓입니다.<br>색상과 붓·입자 크기를 바꿔 나만의 풍경을 만들어보세요.</p>
     <small>P · 일시정지 / 계속하기 &nbsp;&nbsp; R · 비우기</small>
   </div>
   <div class="tools" role="group" aria-label="모래 조작 도구">
@@ -48,7 +49,8 @@
       <button data-color="4" style="--swatch:#d395ae" aria-label="분홍색 모래" aria-pressed="false" title="분홍색 모래"></button>
       <button data-color="5" style="--swatch:#d1b176" aria-label="모래색 모래" aria-pressed="true" title="모래색 모래"></button>
     </div>
-    <label class="brush" for="brush"><span class="sr-only">붓 크기</span><input id="brush" type="range" min="1" max="8" value="3"><output id="size">3</output></label>
+    <label class="brush" for="brush"><span>붓</span><input id="brush" aria-label="붓 크기" type="range" min="1" max="8" value="3"><output id="size" for="brush">3</output></label>
+    <label class="brush particle-size" for="particle-size"><span>입자</span><input id="particle-size" aria-label="모래 입자 크기" type="range" min="2" max="12" step="1" value="2"><output id="particle-size-value" for="particle-size">2px</output></label>
     <div class="actions">
       <button id="pause" aria-label="일시정지" title="일시정지 (P)" aria-pressed="false">Ⅱ</button>
       <button id="reset" aria-label="모래 비우기" title="모래 비우기 (R)">↻</button>
@@ -79,7 +81,7 @@
       let activeMin, activeMax, scanMin, scanMax, activeRows = 0;
       let imageData, pixels, dirtyFlags, dirtyCells, dirtyCount = 0;
       let color = 5, brush = 3, paused = false, pointer = null, pointerId = null, last = 0, count = 0;
-      let frameId = 0, renderedCount = -1;
+      let frameId = 0, sizeFrameId = 0, renderedCount = -1;
       const STEP_MS = 1000 / 40;
 
       function resetActivity() {
@@ -110,18 +112,45 @@
       }
 
       function resize() {
+        if (sizeFrameId) cancelAnimationFrame(sizeFrameId);
+        sizeFrameId = 0;
         stopFrame();
         const width = window.innerWidth, height = window.innerHeight;
-        const size = Math.max(2, Math.ceil(Math.sqrt(width * height / 300000)));
+        const minimumSize = Math.max(2, Math.ceil(Math.sqrt(width * height / 300000)));
+        const control = el('particle-size');
+        const size = Math.min(Math.max(12, minimumSize), Math.max(minimumSize, Math.round(Number(control.value) || minimumSize)));
+        control.min = String(minimumSize);
+        control.max = String(Math.max(12, minimumSize));
+        control.value = String(size);
+        el('particle-size-value').textContent = `${size}px`;
         const newW = Math.ceil(width / size), newH = Math.ceil(height / size);
         const next = new Uint8Array(newW * newH);
         const dx = Math.floor((newW - W) / 2), dy = newH - H;
         count = 0;
-        for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-          const grain = grid[y * W + x], xx = x + dx, yy = y + dy;
-          if (grain && xx >= 0 && xx < newW && yy >= 0 && yy < newH) {
+        if (W && size !== S) {
+          // Keep grains near their screen position, stacking colliding grains upward.
+          const freeTop = new Int32Array(newW).fill(newH - 1), overflow = [];
+          for (let y = H - 1; y >= 0; y--) for (let x = 0; x < W; x++) {
+            const grain = grid[y * W + x];
+            if (!grain) continue;
+            const xx = Math.max(0, Math.min(newW - 1, Math.floor((x - W / 2) * S / size + newW / 2)));
+            const yy = Math.min(freeTop[xx], newH - 1 - Math.floor((H - 1 - y) * S / size));
+            if (yy < 0) { overflow.push(grain); continue; }
             next[yy * newW + xx] = grain;
+            freeTop[xx] = yy - 1;
             count++;
+          }
+          // Reuse free cells before discarding grains that cannot fit at the larger size.
+          for (let i = next.length - 1; i >= 0 && overflow.length; i--) if (!next[i]) {
+            next[i] = overflow.pop(); count++;
+          }
+        } else {
+          for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+            const grain = grid[y * W + x], xx = x + dx, yy = y + dy;
+            if (grain && xx >= 0 && xx < newW && yy >= 0 && yy < newH) {
+              next[yy * newW + xx] = grain;
+              count++;
+            }
           }
         }
         W = newW; H = newH; S = size; grid = next;
@@ -255,6 +284,11 @@
       el('pause').onclick = pause;
       el('reset').onclick = clear;
       el('brush').oninput = e => { brush = Number(e.target.value); el('size').textContent = brush; };
+      el('particle-size').oninput = e => {
+        el('particle-size-value').textContent = `${e.target.value}px`;
+        // Rebuild at most once per display frame while dragging the slider.
+        if (!sizeFrameId) sizeFrameId = requestAnimationFrame(() => { sizeFrameId = 0; resize(); });
+      };
       document.querySelectorAll('[data-color]').forEach(button => button.onclick = () => {
         color = Number(button.dataset.color);
         document.querySelectorAll('[data-color]').forEach(other => other.setAttribute('aria-pressed', String(other === button)));
